@@ -32,9 +32,11 @@ Change to _TRUE_ to save the page source as `debug-<year>-*.html` when a page ca
 - `pip3 install -r requirements.txt`
 - `python3 scraper.py`
 
-Sign in to Amazon in the browser window the script opens, then press Enter in the terminal. A CSV is written per year plus `all_years.csv`.
+Sign in to Amazon in the browser window the script opens, then press Enter in the terminal. Order CSVs are written per year plus `all_years.csv`, and item CSVs per year (`items_<year>.csv`) plus `all_items.csv`.
 
 ## Output
+
+### Orders (`<year>.csv`, `all_years.csv`), one row per order
 
 | Column | Meaning |
 | --- | --- |
@@ -44,7 +46,21 @@ Sign in to Amazon in the browser window the script opens, then press Enter in th
 | `Amount` | Order total. Cancelled orders show 0, because Amazon prints no total for them |
 | `Details` | Order number. Physical orders look like `402-1234567-1234567`, digital ones `D01-1234567-1234567` |
 | `Name` | Item names, separated by ` \| ` |
-| `Status` | Delivery status, e.g. `Delivered 3 March`, `Cancelled`, `Returned`. Filter on `Cancelled` to exclude those orders |
+| `Status` | Delivery status, e.g. `Delivered 3 March`, `Cancelled`, `Return complete`. Filter on `Cancelled` to exclude those orders |
+
+### Items (`items_<year>.csv`, `all_items.csv`), one row per item
+
+Every order is split into its items, including grocery (Amazon Now / Fresh) orders, which show up as one row per order in the order CSVs.
+
+| Column | Meaning |
+| --- | --- |
+| `Date` | Date of the order |
+| `Details` | Order number, to join back to the order CSVs |
+| `Name` | Item name |
+| `Units` | Quantity of this item. The units of an order's items add up to that order's `Units` |
+| `Status` | Status of the order |
+
+The order list does not show per-item prices, so amounts are only in the order CSVs.
 
 ## Requirements
 

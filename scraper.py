@@ -71,6 +71,9 @@ STATUS_KEYWORDS = (
     'closed due to', 'payment', 'declined', 'cannot display',
     'successful', 'trip completed', 'journey completed',
 )
+# "Return window closed on 12 Jan" is a note under the item, not an order status.
+STATUS_IGNORED = ('return window',)
+# Every item sits in its own tile holding its name and quantity badge.
 ITEM_BOX_SELECTORS = [
     '.item-box',
     '.a-fixed-left-grid-inner',
@@ -81,6 +84,9 @@ QTY_SELECTORS = [
     '.item-view-qty',
     '[class*="item-view-qty"]',
 ]
+ORDER_FIELDS = ['Date', 'Number', 'Units', 'Amount', 'Details', 'Name', 'Status']
+ITEM_FIELDS = ['Date', 'Details', 'Name', 'Units', 'Status']
+OTHER_ITEMS = 'Other items in this order'
 
 
 # Windows consoles default to cp1252, which cannot encode the rupee sign or
@@ -92,11 +98,21 @@ except (AttributeError, OSError):
 
 
 def write_csv(filename, data):
-    fields = ['Date', 'Number', 'Units', 'Amount', 'Details', 'Name', 'Status']
     with open(filename, 'w', encoding='utf-8', newline='') as csvfile:
         csvwriter = csv.writer(csvfile, quoting=csv.QUOTE_MINIMAL, escapechar='\\')
-        csvwriter.writerow(fields)
-        csvwriter.writerows(data)
+        csvwriter.writerow(ORDER_FIELDS)
+        csvwriter.writerows(order[:len(ORDER_FIELDS)] for order in data)
+
+
+def write_items_csv(filename, data):
+    # One row per item; Details is the order number, so rows join back to the order CSVs.
+    # Item prices are not shown on the order list, so the amount stays in the order CSVs.
+    with open(filename, 'w', encoding='utf-8', newline='') as csvfile:
+        csvwriter = csv.writer(csvfile, quoting=csv.QUOTE_MINIMAL, escapechar='\\')
+        csvwriter.writerow(ITEM_FIELDS)
+        for order in data:
+            for name, quantity in order[7]:
+                csvwriter.writerow([order[0], order[4], name, quantity, order[6]])
 
 
 def first_match(scope, selectors):
@@ -120,7 +136,7 @@ def text_of(element):
 def parse_money(value):
     if not value:
         return 0.0
-    match = MONEY_RE.search(value.replace(',', '').replace(' ', ''))
+    match = MONEY_RE.search(value.replace(',', '').replace(' ', ''))
     if not match:
         return 0.0
     try:
@@ -145,44 +161,73 @@ def header_lines(card):
     return [line for line in text_of(scope).splitlines() if line.strip()]
 
 
-def item_names(card):
+def title_text(scope):
+    for selector in ITEM_TITLE_SELECTORS:
+        try:
+            elements = scope.find_elements(By.CSS_SELECTOR, selector)
+        except WebDriverException:
+            continue
+        for element in elements:
+            text = text_of(element)
+            if text:
+                return text.splitlines()[0].strip()
+    return ''
+
+
+def image_name(scope):
+    # Grocery orders (Amazon Fresh / Amazon Now) show items as image-only tiles:
+    # there is no product title and the /dp/ links carry no text, so the name
+    # lives only in the thumbnail's alt attribute.
+    try:
+        images = scope.find_elements(By.CSS_SELECTOR, 'img')
+    except WebDriverException:
+        return ''
+    for image in images:
+        try:
+            alt = (image.get_attribute('alt') or '').strip()
+        except WebDriverException:
+            continue
+        # The delivery brand logo sits outside the item tiles, but skip it anyway.
+        if alt and 'brand image' not in alt.lower():
+            return alt
+    return ''
+
+
+def item_quantity(scope):
+    # Amazon only renders a quantity badge when the quantity is greater than one.
+    for element in first_match(scope, QTY_SELECTORS):
+        match = re.search(r'\d+', text_of(element))
+        if match:
+            return int(match.group(0))
+    return 1
+
+
+def parse_items(card):
+    # Read each tile on its own so a quantity badge stays attached to its item.
+    items = []
+    for container in first_match(card, ITEM_BOX_SELECTORS):
+        name = title_text(container) or image_name(container)
+        if name:
+            items.append([name, item_quantity(container)])
+    if items:
+        return items
+
+    # Layouts without item tiles: fall back to the titles anywhere on the card.
     for selector in ITEM_TITLE_SELECTORS:
         try:
             elements = card.find_elements(By.CSS_SELECTOR, selector)
         except WebDriverException:
             continue
-        names, seen = [], set()
+        seen = set()
         for element in elements:
             text = text_of(element)
             name = text.splitlines()[0].strip() if text else ''
             if name and name not in seen:
                 seen.add(name)
-                names.append(name)
-        if names:
-            return names
-    return image_item_names(card)
-
-
-def image_item_names(card):
-    # Grocery orders (Amazon Fresh / Amazon Now) show items as image-only tiles:
-    # there is no product title and the /dp/ links carry no text, so the name
-    # lives only in the thumbnail's alt attribute.
-    names = []
-    for container in first_match(card, ITEM_BOX_SELECTORS):
-        try:
-            images = container.find_elements(By.CSS_SELECTOR, 'img')
-        except WebDriverException:
-            continue
-        for image in images:
-            try:
-                alt = (image.get_attribute('alt') or '').strip()
-            except WebDriverException:
-                continue
-            # The delivery brand logo sits outside the item tiles, but skip it anyway.
-            if alt and 'brand image' not in alt.lower():
-                names.append(alt)
-                break
-    return names
+                items.append([name, 1])
+        if items:
+            return items
+    return items
 
 
 def is_cancelled(order):
@@ -192,7 +237,8 @@ def is_cancelled(order):
 def first_status_line(lines):
     for line in lines:
         line = line.strip()
-        if line and line.lower().startswith(STATUS_KEYWORDS):
+        lowered = line.lower()
+        if line and lowered.startswith(STATUS_KEYWORDS) and not lowered.startswith(STATUS_IGNORED):
             return line
     return ''
 
@@ -223,19 +269,6 @@ def is_fresh_order(card, card_text):
     return False
 
 
-def item_units(card, number):
-    # Amazon only renders a quantity badge when the quantity is greater than one.
-    quantities = []
-    for element in first_match(card, QTY_SELECTORS):
-        match = re.search(r'\d+', text_of(element))
-        if match:
-            quantities.append(int(match.group(0)))
-    if not quantities:
-        return number
-    explicit = quantities[:number] if number else quantities
-    return sum(explicit) + max(number - len(explicit), 0)
-
-
 def parse_order(card):
     lines = header_lines(card)
     header_text = '\n'.join(lines)
@@ -262,22 +295,30 @@ def parse_order(card):
                 total = amount
                 break
 
-    names = item_names(card)
-    number = len(names)
-    units = item_units(card, number)
+    items = parse_items(card)
+    number = len(items)
+    units = sum(quantity for _, quantity in items)
 
     bulk = ITEMS_IN_ORDER_RE.search(card_text)
     if bulk:
-        # Grocery and Fresh orders collapse their contents into "N items in this order".
+        # Older Fresh orders collapse their contents into "N items in this order".
         number = max(number, int(bulk.group(1)))
         units = max(units, number)
-        if not names and is_fresh_order(card, card_text):
-            names = ['Amazon Fresh']
+        if not items:
+            items = [['Amazon Fresh' if is_fresh_order(card, card_text) else '', units]]
     if not number:
         number = units = 1
+    if not items:
+        items = [['', units]]
 
-    return [date, number, units, total, order_id, ' | '.join(names),
-            order_status(card, card_text, header_text)]
+    names = ' | '.join(name for name, _ in items if name)
+    listed = sum(quantity for _, quantity in items)
+    if units > listed:
+        # Keep the items CSV adding up to the order's units when not every item is listed.
+        items.append([OTHER_ITEMS, units - listed])
+
+    return [date, number, units, total, order_id, names,
+            order_status(card, card_text, header_text), items]
 
 
 def dump_debug(wd, tag):
@@ -427,12 +468,14 @@ def main():
             print('---------------------------------------------------------')
             all_data.extend(data)
             write_csv(f'{year}.csv', data)
+            write_items_csv(f'items_{year}.csv', data)
         wd.quit()
         wd = None
         if not all_data:
             print('No orders were scraped. Set DEBUG = True and re-run to save the page source.')
         else:
             write_csv('all_years.csv', all_data)
+            write_items_csv('all_items.csv', all_data)
             total_orders = len(all_data)
             total_items = sum(order[1] for order in all_data)
             total_units = sum(order[2] for order in all_data)
